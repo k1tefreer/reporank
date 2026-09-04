@@ -113,8 +113,10 @@ def score_instance(
 
 def aggregate(scores: Sequence[InstanceScore], ks: Sequence[int] = DEFAULT_KS) -> dict:
     """汇总成一行报告。"""
+    #if not scores:
+     #   return {}
     if not scores:
-        return {}
+        return {"n_instances": 0, "mrr": 0.0}
     out: dict = {"n_instances": len(scores), "mrr": mean(s.rr for s in scores)}
     for k in ks:
         out[f"recall@{k}"] = mean(s.recall[k] for s in scores)
@@ -126,8 +128,11 @@ def aggregate(scores: Sequence[InstanceScore], ks: Sequence[int] = DEFAULT_KS) -
 
 def format_report(agg: dict, ks: Sequence[int] = DEFAULT_KS) -> str:
     """打印成对齐表格，方便直接贴进 README。"""
-    if not agg:
-        return "(no results)"
+    #if not agg:
+    #    return "(no results)"
+    if not agg or not agg.get("n_instances"):
+        return "(no results — 所有实例都被跳过，先看上面的 [skip] 原因)"
+    
     lines = [
         f"instances: {agg['n_instances']}    MRR: {agg['mrr']:.4f}",
         "",
