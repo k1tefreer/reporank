@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+/data/
+results/
+fixtures/mini_repo/
+.DS_Store
+.env
