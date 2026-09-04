@@ -8,3 +8,4 @@ results/
 fixtures/mini_repo/
 .DS_Store
 .env
+NOTES.md
