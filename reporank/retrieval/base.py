@@ -43,19 +43,37 @@ class Retriever(ABC):
     def search(self, query: str, top_k: int = 30) -> list[Hit]:
         """检索，返回按分数降序的 Hit。"""
 
-    def search_files(self, query: str, top_k: int = 30) -> list[str]:
-        """返回去重后的文件路径列表。
+    # chunk -> 文件的分数聚合方式。切分之后这是个关键超参：
+    #   max      取该文件所有 chunk 的最高分。不受文件长度影响，是安全默认值
+    #   sum      所有 chunk 分数求和。会偏向 chunk 多的大文件，通常更差
+    #   topk_sum 取前 N 个 chunk 求和。折中方案：多处相关能加分，但不会
+    #            让大文件靠数量取胜
+    agg: str = "max"
+    agg_topk: int = 3
 
-        chunk 级检索时一个文件可能出现多次，这里按最高分折叠到文件级，
-        因为评测和喂给 LLM 的都是文件粒度。
+    def search_files(self, query: str, top_k: int = 30) -> list[str]:
+        """把 chunk 级结果折叠成文件级排序。
+
+        W1 时一个文件就是一个 doc，折叠是恒等操作。
+        W3 切分之后一个文件会有几十个 chunk，折叠方式直接影响排序。
         """
-        seen: set[str] = set()
-        out: list[str] = []
-        # 多取一些再折叠，避免去重后不够 top_k
-        for hit in self.search(query, top_k=top_k * 4):
-            if hit.path not in seen:
-                seen.add(hit.path)
-                out.append(hit.path)
-                if len(out) >= top_k:
-                    break
-        return out
+        # 多取一些再折叠：切分后同一文件会占掉大量名额
+        pool = self.search(query, top_k=max(top_k * 20, 200))
+
+        scores: dict[str, float] = {}
+        buckets: dict[str, list[float]] = {}
+        for hit in pool:
+            buckets.setdefault(hit.path, []).append(hit.score)
+
+        for path, vals in buckets.items():
+            if self.agg == "sum":
+                scores[path] = sum(vals)
+            elif self.agg == "topk_sum":
+                scores[path] = sum(sorted(vals, reverse=True)[: self.agg_topk])
+            else:
+                scores[path] = max(vals)
+
+        ranked = sorted(scores, key=lambda p: -scores[p])
+        return ranked[:top_k]
+
+    

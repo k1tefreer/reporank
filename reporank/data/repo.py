@@ -93,12 +93,20 @@ def is_source_file(rel_path: str, *, exclude_tests: bool = False) -> bool:
     return Path(rel_path).suffix in SOURCE_EXTS
 
 
-def build_corpus(root: Path, *, exclude_tests: bool = False) -> list[Document]:
-    """遍历快照目录，产出文件级 Document 列表。
+def build_corpus(
+    root: Path,
+    *,
+    exclude_tests: bool = False,
+    chunking: str = "file",
+) -> list[Document]:
+    """遍历快照目录，产出 Document 列表。
 
-    W1 是「一个文件 = 一个 Document」。W3 会换成 AST chunk，
-    但 Document.path 保持不变，评测层完全不用改。
+    chunking 决定切分粒度："file" 是 W2 基线，"ast" / "window" 见 index/chunker.py。
+    无论哪种策略，Document.path 始终是文件路径，评测层完全不用改。
     """
+    from ..index.chunker import get_chunker
+
+    chunker = get_chunker(chunking)
     docs: list[Document] = []
     root = Path(root)
     for p in root.rglob("*"):
@@ -113,5 +121,5 @@ def build_corpus(root: Path, *, exclude_tests: bool = False) -> list[Document]:
             content = p.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        docs.append(Document(doc_id=rel, path=rel, content=content))
+        docs.extend(chunker(rel, content))
     return docs

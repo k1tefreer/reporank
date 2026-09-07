@@ -36,12 +36,16 @@ class BM25Retriever(Retriever):
         path_boost: int = 3,
         naive_tokenizer: bool = False,
         max_doc_tokens: int = 20_000,
+        agg: str = "max",
+        agg_topk: int = 3,
     ) -> None:
         self.k1 = k1
         self.b = b
         self.path_boost = path_boost
         self.naive_tokenizer = naive_tokenizer
         self.max_doc_tokens = max_doc_tokens
+        self.agg = agg
+        self.agg_topk = agg_topk
         self._bm25: BM25Okapi | None = None
         self._docs: list[Document] = []
 
@@ -50,6 +54,8 @@ class BM25Retriever(Retriever):
             suffix.append("naive")
         if path_boost != 3:
             suffix.append(f"pb{path_boost}")
+        if agg != "max":
+            suffix.append(agg)
         if suffix:
             self.name = "bm25-" + "-".join(suffix)
 
@@ -80,3 +86,5 @@ class BM25Retriever(Retriever):
             Hit(doc_id=self._docs[i].doc_id, path=self._docs[i].path, score=float(scores[i]))
             for i in order
         ]
+
+    

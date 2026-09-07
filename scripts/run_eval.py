@@ -37,6 +37,28 @@ RETRIEVERS = {
     "bm25-naive": lambda: BM25Retriever(naive_tokenizer=True),
     "bm25-nopath": lambda: BM25Retriever(path_boost=0),
     "bm25-pathx6": lambda: BM25Retriever(path_boost=6),
+    # W3: chunk -> file 的分数聚合方式对照
+    "bm25-sum": lambda: BM25Retriever(agg="sum"),
+    "bm25-topksum": lambda: BM25Retriever(agg="topk_sum"),
+
+    #### 调参 尝试########
+    # W3.5: BM25 超参扫描，为基线定标（在前 50 条开发集上做）
+    "bm25-b0.3": lambda: BM25Retriever(b=0.3),
+    "bm25-b0.5": lambda: BM25Retriever(b=0.5),
+    "bm25-b0.9": lambda: BM25Retriever(b=0.9),
+    "bm25-k1.2": lambda: BM25Retriever(k1=1.2),
+    "bm25-k2.0": lambda: BM25Retriever(k1=2.0),
+    # 路径加权强度
+    "bm25-pathx1": lambda: BM25Retriever(path_boost=1),
+    "bm25-pathx6": lambda: BM25Retriever(path_boost=6),
+    "bm25-pathx10": lambda: BM25Retriever(path_boost=10),
+    # run_eval.py 注册表里加
+    #"bm25-tuned": lambda: BM25Retriever(k1=1.2, b=0.5, path_boost=10),
+    #"bm25-tuned-b075": lambda: BM25Retriever(k1=1.2, b=0.75, path_boost=10)
+    # W3.5 最终基线
+    "bm25-tuned": lambda: BM25Retriever(k1=1.2, b=0.75, path_boost=10),
+    # 对照：b=0.5 单独扫描时最优，但组合下反而更差
+    "bm25-tuned-b05": lambda: BM25Retriever(k1=1.2, b=0.5, path_boost=10),
 }
 
 
@@ -45,6 +67,12 @@ def main() -> None:
     ap.add_argument("--data", required=True, help="instances JSONL")
     ap.add_argument("--retriever", default="bm25", choices=sorted(RETRIEVERS))
     ap.add_argument("--local-corpus", help="用本地目录当语料（跳过 git clone）")
+    ap.add_argument(
+        "--chunking",
+        default="file",
+        choices=["file", "window", "ast"],
+        help="切分策略: file=整文件(W2基线) window=固定行窗口(对照) ast=函数级",
+    )
     ap.add_argument("--top-k", type=int, default=30)
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 条")
     ap.add_argument("--exclude-tests", action="store_true")
@@ -58,16 +86,20 @@ def main() -> None:
 
     if args.local_corpus:
         root = Path(args.local_corpus)
-        cached = repo_mod.build_corpus(root, exclude_tests=args.exclude_tests)
+        cached = repo_mod.build_corpus(
+            root, exclude_tests=args.exclude_tests, chunking=args.chunking
+        )
 
         def corpus_fn(_: Instance):
             return cached
     else:
         def corpus_fn(ins: Instance):
             snap = repo_mod.export_snapshot(ins.repo, ins.base_commit)
-            return repo_mod.build_corpus(snap, exclude_tests=args.exclude_tests)
+            return repo_mod.build_corpus(
+                snap, exclude_tests=args.exclude_tests, chunking=args.chunking
+            )
 
-    print(f"running {args.retriever} on {len(instances)} instances ...")
+    print(f"running {args.retriever} [chunking={args.chunking}] on {len(instances)} instances ...")
     agg, scores = run_eval(
         instances,
         corpus_fn,
@@ -80,7 +112,7 @@ def main() -> None:
     print()
     print(f"skipped: {agg['skipped']}   gold_not_in_corpus: {agg['gold_not_in_corpus']}")
 
-    run_name = args.run_name or f"{args.retriever}_{datetime.now():%m%d_%H%M}"
+    run_name = args.run_name or f"{args.retriever}_{args.chunking}_{datetime.now():%m%d_%H%M}"
     out = save_results(
         args.out,
         run_name,
