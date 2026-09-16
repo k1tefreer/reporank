@@ -26,7 +26,8 @@ EMB_CACHE = CACHE_DIR / "embeddings"
 # 默认用小模型。22M 参数、384 维，在 MacBook 上可用。
 # 先用它把管道跑通拿到基线，再换 Qwen3-Embedding-0.6B 看上限 ——
 # 公开报告显示 0.6B 效果接近 8B 而成本低得多，是性价比拐点。
-DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+#DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 
 # 代码检索的候选模型，按大小排列。换模型只需改 --emb-model 参数。
 KNOWN_MODELS = {

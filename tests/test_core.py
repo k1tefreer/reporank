@@ -191,3 +191,117 @@ class TestAggregation:
 
     def test_topk_sum_between_the_two(self):
         assert self._make("topk_sum").search_files("widget", 1)[0] == "big.py"
+
+
+class _FakeEmbedder:
+    """确定性假嵌入，让稠密检索的逻辑可以脱离模型下载来测试。
+
+    用词袋哈希投影成向量：内容相似 -> 向量相似。够用来验证
+    索引/检索/聚合的正确性，不验证真实模型质量。
+    """
+
+    model_name = "fake/test-model"
+
+    def __init__(self, dim=32):
+        self._dim = dim
+        self.calls = 0
+
+    def encode(self, texts):
+        import numpy as np
+        self.calls += len(texts)
+        out = np.zeros((len(texts), self._dim), dtype=np.float32)
+        for i, t in enumerate(texts):
+            for tok in t.lower().split():
+                out[i, hash(tok) % self._dim] += 1.0
+        n = np.linalg.norm(out, axis=1, keepdims=True)
+        return out / np.maximum(n, 1e-12)
+
+
+class TestDenseRetriever:
+    def _docs(self):
+        from reporank.retrieval.base import Document
+        return [
+            Document("a.py", "a.py", "token expiry validation ttl"),
+            Document("b.py", "b.py", "http header parsing case"),
+            Document("c.py", "c.py", "database query builder sql"),
+        ]
+
+    def test_finds_semantically_closest(self):
+        from reporank.retrieval.dense import DenseRetriever
+        r = DenseRetriever(embedder=_FakeEmbedder())
+        r.index(self._docs())
+        assert r.search("token expiry ttl", top_k=1)[0].path == "a.py"
+
+    def test_empty_corpus_is_safe(self):
+        from reporank.retrieval.dense import DenseRetriever
+        r = DenseRetriever(embedder=_FakeEmbedder())
+        r.index([])
+        assert r.search("anything") == []
+
+    def test_scores_are_cosine_bounded(self):
+        from reporank.retrieval.dense import DenseRetriever
+        r = DenseRetriever(embedder=_FakeEmbedder())
+        r.index(self._docs())
+        assert all(-1.01 <= h.score <= 1.01 for h in r.search("sql query", top_k=3))
+
+    def test_top_k_respects_limit(self):
+        from reporank.retrieval.dense import DenseRetriever
+        r = DenseRetriever(embedder=_FakeEmbedder())
+        r.index(self._docs())
+        assert len(r.search("token", top_k=2)) == 2
+
+
+class TestPrefilteredDense:
+    def _docs(self):
+        from reporank.retrieval.base import Document
+        return [
+            Document(f"mod{i}.py::c", f"mod{i}.py", f"unrelated filler content number {i}")
+            for i in range(30)
+        ] + [
+            Document("auth/token.py::c", "auth/token.py", "token expiry validation ttl"),
+        ]
+
+    def test_prefilter_limits_encoding_cost(self):
+        from reporank.retrieval.dense import PrefilteredDenseRetriever
+        emb = _FakeEmbedder()
+        r = PrefilteredDenseRetriever(prefilter_files=5, embedder=emb)
+        r.index(self._docs())
+        r.search("token expiry ttl", top_k=3)
+        # 只编码粗筛出的 5 个文件 + 1 次查询，远少于 31 个文档
+        assert emb.calls <= 6
+
+    def test_prefilter_recall_reports_ceiling(self):
+        from reporank.retrieval.dense import PrefilteredDenseRetriever
+        r = PrefilteredDenseRetriever(prefilter_files=5, embedder=_FakeEmbedder())
+        r.index(self._docs())
+        rec = r.prefilter_recall("token expiry validation ttl", ["auth/token.py"])
+        assert 0.0 <= rec <= 1.0
+
+
+class TestEmbedderCache:
+    def test_cache_avoids_recompute(self, tmp_path, monkeypatch):
+        import reporank.index.embedder as E
+        monkeypatch.setattr(E, "EMB_CACHE", tmp_path / "emb")
+        calls = {"n": 0}
+
+        def fake(texts):
+            import numpy as np
+            calls["n"] += len(texts)
+            return np.ones((len(texts), 8), dtype=np.float32)
+
+        e1 = E.Embedder("m", encode_fn=fake)
+        e1.encode(["alpha", "beta"])
+        assert calls["n"] == 2
+
+        e2 = E.Embedder("m", encode_fn=fake)   # 新实例，只能命中磁盘缓存
+        e2.encode(["alpha", "beta"])
+        assert calls["n"] == 2                  # 没有新增编码
+        assert e2.cache_stats["hit"] == 2
+
+    def test_vectors_are_normalised(self, tmp_path, monkeypatch):
+        import numpy as np
+        import reporank.index.embedder as E
+        monkeypatch.setattr(E, "EMB_CACHE", tmp_path / "emb")
+        e = E.Embedder("m", encode_fn=lambda t: np.full((len(t), 4), 3.0, dtype=np.float32))
+        v = e.encode(["x"])
+        assert abs(float(np.linalg.norm(v[0])) - 1.0) < 1e-5

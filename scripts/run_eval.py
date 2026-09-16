@@ -15,6 +15,8 @@
   python scripts/run_eval.py --data data/swebench_lite.jsonl --retriever bm25 --limit 50
 """
 
+
+
 from __future__ import annotations
 
 import argparse
@@ -29,36 +31,46 @@ from reporank.data.swebench import Instance, load_jsonl
 from reporank.eval.metrics import format_report
 from reporank.eval.runner import run_eval, save_results
 from reporank.retrieval.bm25 import BM25Retriever
+from reporank.retrieval.dense import DenseRetriever, PrefilteredDenseRetriever
+
+_EMBEDDER = None
+
+def _emb():
+    global _EMBEDDER
+    if _EMBEDDER is None:
+        from reporank.index.embedder import Embedder
+        _EMBEDDER = Embedder(EMB_MODEL)
+    return _EMBEDDER
 
 # 检索器注册表。W3-W7 每加一种方法，在这里加一行即可，
 # 评测脚本其他部分完全不用动。
+EMB_MODEL = "minilm"  # 由 --emb-model 覆盖
+
 RETRIEVERS = {
     "bm25": lambda: BM25Retriever(),
     "bm25-naive": lambda: BM25Retriever(naive_tokenizer=True),
     "bm25-nopath": lambda: BM25Retriever(path_boost=0),
+    "bm25-pathx1": lambda: BM25Retriever(path_boost=1),
     "bm25-pathx6": lambda: BM25Retriever(path_boost=6),
-    # W3: chunk -> file 的分数聚合方式对照
-    "bm25-sum": lambda: BM25Retriever(agg="sum"),
-    "bm25-topksum": lambda: BM25Retriever(agg="topk_sum"),
-
-    #### 调参 尝试########
-    # W3.5: BM25 超参扫描，为基线定标（在前 50 条开发集上做）
+    "bm25-pathx10": lambda: BM25Retriever(path_boost=10),
     "bm25-b0.3": lambda: BM25Retriever(b=0.3),
     "bm25-b0.5": lambda: BM25Retriever(b=0.5),
     "bm25-b0.9": lambda: BM25Retriever(b=0.9),
     "bm25-k1.2": lambda: BM25Retriever(k1=1.2),
     "bm25-k2.0": lambda: BM25Retriever(k1=2.0),
-    # 路径加权强度
-    "bm25-pathx1": lambda: BM25Retriever(path_boost=1),
-    "bm25-pathx6": lambda: BM25Retriever(path_boost=6),
-    "bm25-pathx10": lambda: BM25Retriever(path_boost=10),
-    # run_eval.py 注册表里加
-    #"bm25-tuned": lambda: BM25Retriever(k1=1.2, b=0.5, path_boost=10),
-    #"bm25-tuned-b075": lambda: BM25Retriever(k1=1.2, b=0.75, path_boost=10)
-    # W3.5 最终基线
+    # W3.5 最终基线（后续所有实验以此为准）
     "bm25-tuned": lambda: BM25Retriever(k1=1.2, b=0.75, path_boost=10),
-    # 对照：b=0.5 单独扫描时最优，但组合下反而更差
     "bm25-tuned-b05": lambda: BM25Retriever(k1=1.2, b=0.5, path_boost=10),
+    # W4: 稠密检索
+    
+    "dense": lambda: DenseRetriever(embedder=_emb()),
+    "dense-topksum": lambda: DenseRetriever(embedder=_emb(), agg="topk_sum"),
+    "prefilter100": lambda: PrefilteredDenseRetriever(prefilter_files=100, embedder=_emb()),
+    "prefilter200": lambda: PrefilteredDenseRetriever(prefilter_files=200, embedder=_emb()),
+    "prefilter500": lambda: PrefilteredDenseRetriever(prefilter_files=500, embedder=_emb()),
+    # W3: chunk -> file 的分数聚合方式对照
+    "bm25-sum": lambda: BM25Retriever(agg="sum"),
+    "bm25-topksum": lambda: BM25Retriever(agg="topk_sum"),
 }
 
 
@@ -76,9 +88,17 @@ def main() -> None:
     ap.add_argument("--top-k", type=int, default=30)
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 条")
     ap.add_argument("--exclude-tests", action="store_true")
+    ap.add_argument(
+        "--emb-model",
+        default="minilm",
+        help="嵌入模型: minilm(22M,默认) / bge-small(33M) / qwen3-0.6b(600M) 或任意 HF 模型名",
+    )
     ap.add_argument("--out", default="results")
     ap.add_argument("--run-name", default="")
     args = ap.parse_args()
+
+    global EMB_MODEL
+    EMB_MODEL = args.emb_model
 
     instances = load_jsonl(args.data)
     if args.limit:
@@ -99,7 +119,10 @@ def main() -> None:
                 snap, exclude_tests=args.exclude_tests, chunking=args.chunking
             )
 
-    print(f"running {args.retriever} [chunking={args.chunking}] on {len(instances)} instances ...")
+    tag = f"{args.retriever} [chunking={args.chunking}]"
+    if args.retriever.startswith(("dense", "prefilter")):
+        tag += f" [emb={args.emb_model}]"
+    print(f"running {tag} on {len(instances)} instances ...")
     agg, scores = run_eval(
         instances,
         corpus_fn,
