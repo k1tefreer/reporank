@@ -305,3 +305,103 @@ class TestEmbedderCache:
         e = E.Embedder("m", encode_fn=lambda t: np.full((len(t), 4), 3.0, dtype=np.float32))
         v = e.encode(["x"])
         assert abs(float(np.linalg.norm(v[0])) - 1.0) < 1e-5
+
+
+class TestFusion:
+    def test_rrf_rewards_appearing_in_both_lists(self):
+        from reporank.retrieval.fusion import rrf_fuse
+        # z.py 两路都出现，a.py / b.py 各只出现一次
+        fused = dict(rrf_fuse([["a.py", "z.py"], ["b.py", "z.py"]], k=10))
+        assert fused["z.py"] > fused["a.py"]
+        assert fused["z.py"] > fused["b.py"]
+
+    def test_rrf_is_convex_extremes_beat_middle(self):
+        """RRF 的一个反直觉性质：1/x 是凸函数，所以「一路第1一路第3」
+        的总分高于「两路都第2」。RRF 并不奖励稳定的中游表现，
+        它奖励至少在一路里冲进头部。这会影响加权策略的设计。"""
+        from reporank.retrieval.fusion import rrf_fuse
+        fused = dict(rrf_fuse([["a.py", "b.py", "c.py"], ["c.py", "b.py", "a.py"]], k=10))
+        assert fused["a.py"] > fused["b.py"]   # 1/11 + 1/13 > 2/12
+        assert fused["c.py"] > fused["b.py"]
+
+    def test_rrf_k_controls_head_emphasis(self):
+        from reporank.retrieval.fusion import rrf_fuse
+        r = [["a.py", "b.py"]]
+        small_k = dict(rrf_fuse(r, k=1))
+        large_k = dict(rrf_fuse(r, k=1000))
+        # k 小 -> 头部名次权重差距大；k 大 -> 各名次趋于平均
+        assert (small_k["a.py"] / small_k["b.py"]) > (large_k["a.py"] / large_k["b.py"])
+
+    def test_rrf_weights_shift_ranking(self):
+        from reporank.retrieval.fusion import rrf_fuse
+        rankings = [["a.py"], ["b.py"]]   # 两路各自独有一个文档
+        assert dict(rrf_fuse(rankings, [3.0, 1.0], k=10))["a.py"] > \
+               dict(rrf_fuse(rankings, [3.0, 1.0], k=10))["b.py"]
+        assert dict(rrf_fuse(rankings, [1.0, 3.0], k=10))["b.py"] > \
+               dict(rrf_fuse(rankings, [1.0, 3.0], k=10))["a.py"]
+
+    def test_rrf_rejects_mismatched_weights(self):
+        from reporank.retrieval.fusion import rrf_fuse
+        with pytest.raises(ValueError):
+            rrf_fuse([["a"], ["b"]], [1.0])
+
+    def test_score_fuse_normalizes_across_scales(self):
+        from reporank.retrieval.fusion import score_fuse
+        # BM25 量纲 ~40，余弦 ~0.8。不归一化的话 BM25 会独裁
+        bm = [("a.py", 40.0), ("b.py", 39.0)]
+        dn = [("b.py", 0.9), ("a.py", 0.1)]
+        fused = dict(score_fuse([bm, dn], norm="minmax"))
+        assert abs(fused["a.py"] - fused["b.py"]) < 0.01   # 两路互相抵消，接近平局
+
+    def test_score_fuse_handles_constant_scores(self):
+        from reporank.retrieval.fusion import score_fuse
+        out = dict(score_fuse([[("a.py", 5.0), ("b.py", 5.0)]], norm="minmax"))
+        assert out["a.py"] == out["b.py"] == 0.0
+
+    def test_zscore_normalisation(self):
+        from reporank.retrieval.fusion import score_fuse
+        out = score_fuse([[("a.py", 10.0), ("b.py", 0.0)]], norm="zscore")
+        assert out[0][0] == "a.py"
+
+    def test_unknown_norm_raises(self):
+        from reporank.retrieval.fusion import score_fuse
+        with pytest.raises(ValueError):
+            score_fuse([[("a.py", 1.0)]], norm="nope")
+
+
+class TestHybridRetriever:
+    def _docs(self):
+        from reporank.retrieval.base import Document
+        return [
+            Document("auth/token.py::A", "auth/token.py", "token expiry ttl validation"),
+            Document("auth/token.py::B", "auth/token.py", "refresh rotate secret"),
+            Document("http/req.py::A", "http/req.py", "header parsing case sensitive"),
+            Document("db/query.py::A", "db/query.py", "sql builder where clause"),
+        ]
+
+    def test_bm25_arm_sees_file_level_docs(self):
+        from reporank.retrieval.fusion import HybridRetriever
+        r = HybridRetriever(embedder=_FakeEmbedder())
+        r.index(self._docs())
+        # 4 个 chunk 合并成 3 个文件
+        assert len(r._bm25._docs) == 3
+
+    def test_sanity_single_arm_modes(self):
+        from reporank.retrieval.fusion import HybridRetriever
+        for m in ("bm25_only", "dense_only"):
+            r = HybridRetriever(method=m, embedder=_FakeEmbedder())
+            r.index(self._docs())
+            assert len(r.search_files("token expiry", top_k=3)) > 0
+
+    def test_fusion_returns_file_paths_not_chunk_ids(self):
+        from reporank.retrieval.fusion import HybridRetriever
+        r = HybridRetriever(embedder=_FakeEmbedder())
+        r.index(self._docs())
+        assert all("::" not in p for p in r.search_files("token expiry", top_k=3))
+
+    def test_no_duplicate_files_in_output(self):
+        from reporank.retrieval.fusion import HybridRetriever
+        r = HybridRetriever(embedder=_FakeEmbedder())
+        r.index(self._docs())
+        files = r.search_files("token", top_k=5)
+        assert len(files) == len(set(files))
